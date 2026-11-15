@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Neurolap</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="labels"></div>
+
+  <!-- top bar: what you are doing, where, in what, and under what sky -->
+  <header id="top">
+    <div class="seg" id="modeSeg">
+      <button data-mode="practice" title="Watch the AI learn">Practice</button>
+      <button data-mode="drive" title="Drive it yourself against the trained cars">Drive</button>
+      <button data-mode="race" title="Race weekend">Race</button>
+    </div>
+    <button class="chip" id="trackChip" title="Track"><b id="tName"></b><span id="tMeta"></span></button>
+    <button class="btn icon" id="newTrack" title="New track">&#x27F3;</button>
+    <button class="chip" id="carChip" title="Car"><b id="cName"></b><span id="cMeta"></span></button>
+    <div class="grow"></div>
+    <div class="cond">
+      <button class="btn icon" id="themeBtn" title="Day or night"></button>
+      <div class="timebox" title="Time of day">
+        <input type="range" id="timeQ" min="0" max="24" step="0.05" />
+        <span id="clock">13:00</span>
+      </div>
+      <div class="seg small" id="wxSeg">
+        <button data-wx="dry">Dry</button>
+        <button data-wx="rain">Rain</button>
+        <button data-wx="snow">Snow</button>
+      </div>
+      <input type="range" id="wxQ" min="0.1" max="1" step="0.05" title="How hard" />
+    </div>
+  </header>
+
+  <!-- rail: each button slides out one panel; click again to tuck it away -->
+  <nav id="rail">
+    <button data-pane="track"><i>&#x25CE;</i><span>Track</span></button>
+    <button data-pane="car"><i>&#x2699;</i><span>Car</span></button>
+    <button data-pane="driver"><i>&#x2726;</i><span>Driver</span></button>
+    <button data-pane="sky"><i>&#x263C;</i><span>Sky</span></button>
+  </nav>
+
+  <aside id="panel">
+    <section class="pane" data-pane="track">
+      <h2>Circuit style</h2>
+      <div id="styleList" class="cards"></div>
+      <h2>Seed</h2>
+      <div class="row">
+        <input id="seed" type="number" min="1" max="999999" />
+        <button id="rollTrack" class="btn primary">New track</button>
+      </div>
+      <p id="trackInfo" class="hint"></p>
+    </section>
+
+    <section class="pane" data-pane="car">
+      <h2>Car</h2>
+      <div id="carList" class="cards"></div>
+      <p id="carBlurb" class="hint"></p>
+      <h2>Tyres</h2>
+      <div id="tyreList" class="tyres"></div>
+      <p id="tyreInfo" class="hint"></p>
+      <h2>Setup <span id="setupTag" class="tag"></span><button id="resetCar" class="link">back to standard</button></h2>
+      <div id="carSliders"></div>
+    </section>
+
+    <section class="pane" data-pane="driver">
+      <h2>How the driver learns</h2>
+      <p class="hint">Nobody steers. Each generation, a field of small neural networks drives the car; the ones that get furthest, fastest, are bred and mutated into the next.</p>
+      <div id="aiSliders"></div>
+      <button id="resetBrain" class="btn wide">Wipe the drivers and start over</button>
+    </section>
+
+    <section class="pane" data-pane="sky">
+      <h2>Time of day</h2>
+      <div class="slider">
+        <div class="top"><span>Clock</span><b id="clock2">13:00</b></div>
+        <input type="range" id="timeP" min="0" max="24" step="0.05" />
+        <div class="ends"><span>midnight</span><span>noon</span><span>midnight</span></div>
+      </div>
+      <div class="row">
+        <button id="cycleBtn" class="btn">Let time pass</button>
+        <button id="lightBtn" class="btn">Headlights: auto</button>
+      </div>
+      <h2>Weather</h2>
+      <div class="seg" id="wxSeg2">
+        <button data-wx="dry">Dry</button>
+        <button data-wx="rain">Rain</button>
+        <button data-wx="snow">Snow</button>
+      </div>
+      <div class="slider" id="wxWrap">
+        <div class="top"><span>How hard</span><b id="wxVal"></b></div>
+        <input type="range" id="wxP" min="0.1" max="1" step="0.05" />
+        <div class="ends"><span>drizzle</span><span>downpour</span></div>
+      </div>
+      <h2>Road right now</h2>
+      <div class="meter"><span>Standing water</span><div><i id="mWater"></i></div></div>
+      <div class="meter"><span>Snow on the line</span><div><i id="mSnow"></i></div></div>
+      <div class="meter"><span>Grip on these tyres</span><div><i id="mGrip"></i></div></div>
+      <p class="hint">Cars push water and snow aside as they pass, so a dry line forms where they drive once the rain stops.</p>
+    </section>
+  </aside>
+
+  <!-- right: readouts -->
+  <div id="hud">
+    <div class="card stats" data-for="practice">
+      <div class="stat big"><b id="sGen">1</b><span>generation</span></div>
+      <div class="stat big"><b id="sBest" class="hot">-</b><span>best lap</span></div>
+      <div class="stat"><b id="sAlive">0</b><span>driving</span></div>
+      <div class="stat"><b id="sSpeed">0</b><span>leader km/h</span></div>
+      <div class="stat"><b id="sRecord">-</b><span>track record</span></div>
+      <div class="stat"><b id="sCrash">0</b><span>crashes</span></div>
+    </div>
+    <div class="card fold" data-for="practice" data-fold="curve">
+      <h3><button class="foldBtn">Learning curve</button><small id="chartNote"></small></h3>
+      <canvas id="chart" width="560" height="200"></canvas>
+    </div>
+    <div class="card fold" data-for="practice" data-fold="brain">
+      <h3><button class="foldBtn">Leader's brain</button><small>sees, thinks, drives</small></h3>
+      <canvas id="brain" width="560" height="280"></canvas>
+    </div>
+
+    <div class="card driveCard" data-for="drive">
+      <h3>At the wheel<small>arrows or WASD, R to recover</small></h3>
+      <div class="stats">
+        <div class="stat big"><b id="vSpd">0</b><span>km/h</span></div>
+        <div class="stat big"><b id="vLap" class="hot">0.00</b><span>this lap</span></div>
+        <div class="stat"><b id="vN">0</b><span>laps</span></div>
+        <div class="stat"><b id="vLast">-</b><span>last lap</span></div>
+        <div class="stat"><b id="vBest">-</b><span>your best</span></div>
+        <div class="stat"><b id="vAi">-</b><span>AI best</span></div>
+      </div>
+      <p class="hint" id="vNote"></p>
+    </div>
+    <div class="card tower" data-for="race drive">
+      <h3><span id="rLap">Lap 0</span><small id="rClock"></small></h3>
+      <div id="tower"></div>
+    </div>
+    <div class="card feedCard" data-for="race">
+      <h3>Race control and radio</h3>
+      <div id="feed"></div>
+    </div>
+  </div>
+
+  <!-- race: the pit wall -->
+  <div id="dock" data-for="race">
+    <div class="dcell me">
+      <span class="lbl">Your car</span>
+      <b id="dPos">P1</b>
+      <small id="dGap"></small>
+      <small id="dSpd"></small>
+    </div>
+    <div class="dcell tyre">
+      <span class="lbl">Tyres</span>
+      <div class="tyrerow"><i id="dTyre" class="tyreDot"></i><div class="bar"><i id="dWear"></i></div></div>
+      <small id="dWearTxt"></small>
+    </div>
+    <div class="dcell">
+      <span class="lbl">Damage</span>
+      <div class="bar bad"><i id="dDmg"></i></div>
+      <small id="dDmgTxt"></small>
+    </div>
+    <div class="dcell wide">
+      <span class="lbl">Pace <small id="dPaceHint"></small></span>
+      <div class="seg" id="paceSeg"></div>
+    </div>
+    <div class="dcell wide">
+      <span class="lbl">Pit stop <small id="dBoxHint"></small></span>
+      <div class="boxrow"><div id="boxTyres" class="tyres"></div><button id="boxBtn" class="btn primary">Box this lap</button></div>
+    </div>
+    <div class="dcell wx">
+      <span class="lbl">Radar</span>
+      <b id="dWx">Dry</b>
+      <small id="dWxNext"></small>
+    </div>
+  </div>
+
+  <!-- transport and view -->
+  <div id="bar">
+    <div class="group" id="speeds">
+      <button data-speed="0" class="btn" title="Pause (space)">&#10073;&#10073;</button>
+      <button data-speed="1" class="btn">1&times;</button>
+      <button data-speed="4" class="btn">4&times;</button>
+      <button data-speed="16" class="btn">16&times;</button>
+      <button data-speed="-1" class="btn">MAX</button>
+    </div>
+    <div class="group">
+      <button id="camBtn" class="btn">Overview</button>
+      <button id="lineBtn" class="btn on" data-for="practice">Racing line</button>
+      <button id="rayBtn" class="btn on" data-for="practice">Sensors</button>
+      <button id="hudBtn" class="btn on">Readouts</button>
+    </div>
+  </div>
+
+  <div id="modal"></div>
+  <div id="toast"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

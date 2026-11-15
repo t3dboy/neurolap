@@ -73,7 +73,6 @@ export class Car {
   cap = Infinity;    // speed limit imposed from outside (traffic, pit lane)
   braking = false;
   // a human at the controls: steering and pedals come from the player instead of a brain
-  manual = false; inSteer = 0; inThr = 0;
   // the body on its springs: accelerations as the suspension passes them on (it lags and overshoots), and what the body does
   aLong = 0; aLongV = 0; aLat = 0; aLatV = 0;
   roll = 0; pitch = 0; heave = 0; heaveV = 0; spin = 0;
@@ -205,16 +204,9 @@ function physics(c: Car, s: Derived, t: Track, dt: number, gripMul: number, off:
 
 /** One tick of driving: work the pedals towards the wanted speed, turn the wheel, move the car. */
 export function drive(c: Car, d: Derived, t: Track, surf: Surface) {
-  if (c.manual) {
-    // pedals ease in over a moment, so a keyboard is not all-or-nothing
-    const wantT = c.cap < Infinity && c.vf > c.cap ? -0.5 : c.inThr, dT = wantT - c.thr, mx = (wantT < c.thr ? 9 : 5) * DT;
-    c.thr += dT > mx ? mx : dT < -mx ? -mx : dT;
-    c.steerCmd = c.inSteer; c.target = c.vf;
-  } else {
-    const want = c.target < c.cap ? c.target : c.cap;
-    const e = (want - c.vf) * 0.5;
-    c.thr = e > 1 ? 1 : e < -1 ? -1 : e;
-  }
+  const want = c.target < c.cap ? c.target : c.cap;
+  const e = (want - c.vf) * 0.5;
+  c.thr = e > 1 ? 1 : e < -1 ? -1 : e;
   c.braking = c.thr < -0.15;
   const ds = c.steerCmd - c.steer, maxD = 7 * DT;
   c.steer += ds > maxD ? maxD : ds < -maxD ? -maxD : ds;

@@ -14,13 +14,13 @@ const KEY = 'neurolap.v2', SEASON = 'neurolap.season';
 interface Saved {
   seed: number; style: StyleId | 'any'; car: CarId; setup: Setup; tyre: TyreId; ai: AiConfig;
   env: Env; headlights: 'auto' | 'on' | 'off'; pane: string | null; folds: Record<string, boolean>; hud: boolean;
-  race: RaceOpts & { manual: boolean };
+  race: RaceOpts;
 }
 function load(): Saved {
   const d: Saved = {
     seed: 1 + Math.floor(Math.random() * 9999), style: 'any', car: 'gt', setup: { ...CAR_CLASSES.gt.setup }, tyre: CAR_CLASSES.gt.tyre, ai: { ...DEFAULT_AI },
     env: { time: 13, weather: 'dry', intensity: 0.6 }, headlights: 'auto', pane: 'car', folds: {}, hud: true,
-    race: { laps: 5, difficulty: 1, forecast: 'current', startTyre: 'medium', manual: false },
+    race: { laps: 5, difficulty: 1, forecast: 'current', startTyre: 'medium' },
   };
   try {
     const s = JSON.parse(localStorage.getItem(KEY) || 'null');
@@ -37,7 +37,7 @@ const view = new View($<HTMLCanvasElement>('c'));
 view.env = env; view.headlights = state.headlights;
 let track!: Track, surf!: Surface, trainer!: Trainer;
 let race: Race | null = null;
-let mode: 'practice' | 'drive' | 'race' = 'practice';
+let mode: 'practice' | 'race' = 'practice';
 let speed = 1;
 let cycle = false, timeTarget: number | null = null;
 let camTarget: 'overview' | 'follow' | 'leader' = 'overview';
@@ -242,7 +242,7 @@ window.addEventListener('keydown', (e) => {
 function setCam(t: typeof camTarget) {
   camTarget = t;
   view.mode = t === 'overview' ? 'overview' : 'follow';
-  $('camBtn').textContent = t === 'overview' ? 'Overview' : t === 'leader' ? 'Following leader' : mode !== 'practice' ? 'Following you' : 'Following leader';
+  $('camBtn').textContent = t === 'overview' ? 'Overview' : t === 'leader' ? 'Following leader' : mode === 'race' ? 'Following your car' : 'Following leader';
   $('camBtn').classList.toggle('on', t !== 'overview');
 }
 $('camBtn').onclick = () => setCam(camTarget === 'overview' ? 'follow' : camTarget === 'follow' && mode === 'race' ? 'leader' : 'overview');
@@ -271,8 +271,7 @@ function layout() {
   view.insetLeft = W > 700 ? (state.pane ? panel.right : rail.right) + 8 : 0;
   view.insetRight = W > 900 && state.hud ? W - $('hud').getBoundingClientRect().left + 8 : 0;
   view.insetBottom = H - (mode === 'race' ? $('dock').getBoundingClientRect().top || H - 140 : $('bar').getBoundingClientRect().top) + 6;
-  const driving = !!race && race.player.car.manual;
-  view.followScale = driving ? 0.13 : 0.095; view.lead = driving ? 0.55 : 0;
+  view.followScale = 0.095; view.lead = 0;
   view.resize();
 }
 window.addEventListener('resize', layout);
@@ -385,28 +384,17 @@ function modal(html: string | null, big = false) {
   m.classList.toggle('show', !!html);
   m.innerHTML = html ? `<div class="sheet${big ? ' big' : ''}">${html}</div>` : '';
 }
-function setMode(m: 'practice' | 'drive' | 'race') {
+function setMode(m: 'practice' | 'race') {
   mode = m;
   document.body.dataset.mode = m;
   $$('#modeSeg button').forEach((b) => b.classList.toggle('sel', b.dataset.mode === m));
   labels.forEach((l) => (l.style.display = 'none'));
   lightsEl.style.display = 'none';
   if (m === 'practice') { race = null; modal(null); }
-  setCam(m === 'drive' || (m === 'race' && race?.player.car.manual) ? 'follow' : m === 'race' ? 'overview' : camTarget === 'leader' ? 'follow' : camTarget);
+  setCam(m === 'race' ? 'overview' : camTarget === 'leader' ? 'follow' : camTarget);
   layout();
 }
-$$('#modeSeg button').forEach((b) => (b.onclick = () => (b.dataset.mode === 'race' ? raceSetup() : b.dataset.mode === 'drive' ? startDrive() : setMode('practice'))));
-
-/** Free drive: you at the wheel, with the best trained cars (if there are any yet) out on track with you. */
-function startDrive() {
-  race = new Race(track, CAR_CLASSES[state.car], state.setup, trainer.hall, trainer.ai.hidden, trainer.ai.vision, surf, env,
-    { laps: 1e6, difficulty: 1, forecast: 'current', startTyre: state.tyre, manual: true, free: true }, state.seed);
-  setMode('drive'); setSpeed(1);
-  const n = race.entries.length - 1;
-  $('vNote').textContent = n ? `${n} trained car${n === 1 ? '' : 's'} on track with you. Their best lap is the one to beat.` : 'Nobody has learned this car on this track yet, so you have it to yourself. Practise a while and the AI will join you.';
-  toast(padKind ? `You have the wheel: ${padKind === 'ps' ? 'R2 and L2' : 'RT and LT'}, left stick` : 'You have the wheel: arrows or WASD');
-  lastOffs = 0; lastDamage = 0;
-}
+$$('#modeSeg button').forEach((b) => (b.onclick = () => (b.dataset.mode === 'race' ? raceSetup() : setMode('practice'))));
 
 function optRow(name: string, opts: [string, string][], cur: string) {
   return `<div class="opts" data-opt="${name}">${opts.map(([v, l]) => `<button class="btn${v === cur ? ' sel' : ''}" data-v="${v}">${l}</button>`).join('')}</div>`;
@@ -425,15 +413,14 @@ function raceSetup() {
     <p>Eight ${CAR_CLASSES[state.car].name} cars, real contact, tyre wear and pit stops. Your driver is the best brain from practice (${fmtLap(trainer.hall[0].lap)}); the rivals come from the same session. You run the pit wall: pace, tyres and when to stop.</p>
     <h2>Distance</h2>${optRow('laps', [['3', '3 laps'], ['5', '5'], ['8', '8'], ['12', '12'], ['20', '20']], String(o.laps))}
     <h2>Opposition</h2>${optRow('difficulty', [['0', 'Rookies'], ['1', 'Professionals'], ['2', 'Legends']], String(o.difficulty))}
-    <h2>At the wheel</h2>${optRow('manual', [['0', 'Your AI driver'], ['1', 'You drive']], o.manual ? '1' : '0')}
     <h2>Weather</h2>${optRow('forecast', [['current', 'As it is now'], ['changeable', 'Changeable: showers forecast']], o.forecast)}
     <h2>Start on</h2><div id="mTyres" class="tyres"></div>
     <p class="hint">${wetNow ? 'The track is wet right now.' : 'The track is dry right now.'} In a dry race of 6 laps or more you must use two different dry compounds, or take a 10 second penalty.</p>
     <div class="actions"><button class="btn" id="mBack">Back to practice</button><button class="btn primary" id="mGo">Qualify</button></div>`);
   tyreButtons($('mTyres'), () => o.startTyre, (t) => { o.startTyre = t; });
   $$('#modal .opts').forEach((row) => row.querySelectorAll<HTMLElement>('button').forEach((b) => (b.onclick = () => {
-    const k = row.dataset.opt as 'laps' | 'difficulty' | 'forecast' | 'manual';
-    (o as any)[k] = k === 'forecast' ? b.dataset.v : k === 'manual' ? b.dataset.v === '1' : Number(b.dataset.v);
+    const k = row.dataset.opt as 'laps' | 'difficulty' | 'forecast';
+    (o as any)[k] = k === 'forecast' ? b.dataset.v : Number(b.dataset.v);
     row.querySelectorAll('button').forEach((x) => x.classList.toggle('sel', x === b));
   })));
   $('mBack').onclick = () => modal(null);
@@ -446,11 +433,11 @@ function startWeekend() {
   setMode('race'); setSpeed(1); syncSky(); buildDock();
   const r = race;
   const rows = r.order.map((e, k) => `<tr class="${e.isPlayer ? 'me' : ''}"><td class="n">${k + 1}</td><td><i class="dot" style="background:${e.team.color}"></i>${e.team.name}</td><td>${e.team.driver}</td><td class="n">${e.quali ? e.quali.toFixed(2) + 's' : 'no time'}</td><td><i class="tyreDot sm" style="--tc:${e.car.tyre.color}">${e.car.tyre.short}</i></td></tr>`).join('');
-  modal(`<h1>Qualifying</h1><p>One flying lap each decides the grid${o.manual ? ' (your AI driver set yours; you take over for the race)' : ''}${r.spells.length ? '. The forecast is changeable: watch the radar' : ''}.</p>
+  modal(`<h1>Qualifying</h1><p>One flying lap each decides the grid${r.spells.length ? '. The forecast is changeable: watch the radar' : ''}.</p>
     <table class="res"><tr><th></th><th>Team</th><th>Driver</th><th>Lap</th><th></th></tr>${rows}</table>
     <div class="actions"><button class="btn" id="mBack">Abandon</button><button class="btn primary" id="mGo">To the grid</button></div>`);
   $('mBack').onclick = () => setMode('practice');
-  $('mGo').onclick = () => { modal(null); race?.start(); if (o.manual) { lastOffs = 0; lastDamage = 0; toast(padKind ? `You have the wheel: ${padKind === 'ps' ? 'R2 and L2' : 'RT and LT'}, left stick` : 'You have the wheel: arrows or WASD, R to recover'); } };
+  $('mGo').onclick = () => { modal(null); race?.start(); };
 }
 function buildDock() {
   const seg = $('paceSeg');
@@ -468,14 +455,7 @@ function tyreDot(e: Entry) { return `<i class="tyreDot sm" style="--tc:${e.car.t
 function updateRace() {
   const r = race!;
   const p = r.player, c = p.car;
-  if (mode === 'drive') {
-    $('vSpd').textContent = String(Math.round(Math.hypot(c.vf, c.vl) * 3.6));
-    $('vLap').textContent = (r.time - p.lapStartT).toFixed(1);
-    $('vN').textContent = String(p.lap);
-    $('vLast').textContent = fmtLap(p.lastLap); $('vBest').textContent = fmtLap(p.bestLap);
-    $('vAi').textContent = fmtLap(trainer.hall[0]?.lap);
-  }
-  $('rLap').textContent = mode === 'drive' ? 'On track' : r.phase === 'grid' ? 'On the grid' : r.phase === 'lights' ? 'Get ready' : r.phase === 'done' ? 'Finished' : `Lap ${Math.min(r.opts.laps, r.leader().lap + 1)} / ${r.opts.laps}`;
+  $('rLap').textContent = r.phase === 'grid' ? 'On the grid' : r.phase === 'lights' ? 'Get ready' : r.phase === 'done' ? 'Finished' : `Lap ${Math.min(r.opts.laps, r.leader().lap + 1)} / ${r.opts.laps}`;
   $('rClock').textContent = r.phase === 'racing' || r.phase === 'done' ? fmtClock(r.time) : '';
   $('tower').innerHTML = r.order.map((e) => {
     const gp = e.dnf ? 'OUT' : e.pit ? 'PIT' : e.finished ? 'FIN' : e.pos === 1 ? 'leader' : e.lapsDown > 0 ? `+${e.lapsDown} lap` : e.gap !== null ? `+${e.gap.toFixed(1)}` : '';
@@ -491,10 +471,9 @@ function updateRace() {
   $('dWearTxt').textContent = `${c.tyre.name}, ${Math.round((1 - c.wear) * 100)}% left, ${p.stops} stop${p.stops === 1 ? '' : 's'}`;
   $('dDmg').style.width = `${Math.round(c.damage * 100)}%`;
   $('dDmgTxt').textContent = c.damage < 0.05 ? 'none' : c.damage < 0.35 ? 'scuffed' : c.damage < 0.7 ? 'costing grip' : 'critical';
-  $$('#paceSeg button').forEach((b) => b.classList.toggle('sel', !c.manual && b.dataset.p === p.pace));
-  $('paceSeg').classList.toggle('off', c.manual);
-  $('dPaceHint').textContent = c.manual ? 'you set the pace' : PACE[p.pace].hint;
-  $('dSpd').textContent = c.manual ? `${Math.round(Math.hypot(c.vf, c.vl) * 3.6)} km/h` : '';
+  $$('#paceSeg button').forEach((b) => b.classList.toggle('sel', b.dataset.p === p.pace));
+  $('dPaceHint').textContent = PACE[p.pace].hint;
+  $('dSpd').textContent = `${Math.round(Math.hypot(c.vf, c.vl) * 3.6)} km/h`;
   const bb = $<HTMLButtonElement>('boxBtn');
   bb.disabled = !!p.pit || p.finished || p.dnf || r.phase !== 'racing';
   bb.textContent = p.pit ? (p.pit.phase === 'stopped' ? `Stopped ${Math.max(0, p.pit.timer).toFixed(1)}s` : 'In the pit lane') : p.boxCall ? 'Cancel stop' : 'Box this lap';
@@ -546,86 +525,28 @@ function updateLabels() {
   }
 }
 
-// ---------------------------------------------------------------- driving by hand
-const keys = new Set<string>();
-const DRIVE_KEYS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD'];
-window.addEventListener('keydown', (e) => {
-  if (e.target instanceof HTMLInputElement && e.target.type !== 'range') return;
-  if (DRIVE_KEYS.includes(e.code)) { keys.add(e.code); if (race?.player.car.manual) e.preventDefault(); }
-  if (e.code === 'KeyR' && race?.player.car.manual) race.recover();
-});
-window.addEventListener('keyup', (e) => keys.delete(e.code));
-window.addEventListener('blur', () => keys.clear());
-// Controllers. PlayStation and Xbox pads both report the browser's "standard" layout:
-// left stick = axes 0/1, face buttons 0-3 (Cross/A, Circle/B, Square/X, Triangle/Y),
-// L2/LT = 6, R2/RT = 7 (analogue), Share/View = 8, Options/Menu = 9, d-pad = 12-15.
-let padKind: 'ps' | 'xbox' | null = null;
+// ---------------------------------------------------------------- controllers
+// PlayStation and Xbox pads both report the browser's "standard" layout:
+// face buttons 0-3 (Cross/A, Circle/B, Square/X, Triangle/Y), Share/View = 8, Options/Menu = 9.
 const padWas: boolean[] = [];
-let rumbleAt = 0, lastOffs = 0, lastDamage = 0;
 const getPad = (): Gamepad | null => { for (const g of navigator.getGamepads?.() ?? []) if (g && g.connected) return g; return null; };
 const kindOf = (g: Gamepad): 'ps' | 'xbox' => (/xbox|045e|xinput/i.test(g.id) ? 'xbox' : /dualsense|dualshock|playstation|054c|wireless controller/i.test(g.id) ? 'ps' : 'xbox');
-function padHints() {
-  const el = document.querySelector<HTMLElement>('.driveCard h3 small');
-  if (!el) return;
-  el.textContent = padKind === 'ps' ? 'R2 / L2, stick, \u25B3 recover' : padKind === 'xbox' ? 'RT / LT, stick, Y recover' : 'arrows or WASD, R to recover';
-}
-window.addEventListener('gamepadconnected', (e) => {
-  padKind = kindOf(e.gamepad); padHints();
-  toast(`${padKind === 'ps' ? 'PlayStation' : 'Xbox'} controller connected`);
-});
-window.addEventListener('gamepaddisconnected', () => { if (!getPad()) { padKind = null; padHints(); toast('Controller disconnected'); } });
-function rumble(g: Gamepad, strong: number, weak: number, ms: number) {
-  const act = (g as any).vibrationActuator;
-  if (act?.playEffect) act.playEffect('dual-rumble', { duration: ms, strongMagnitude: strong, weakMagnitude: weak }).catch(() => { /* not supported on this pad */ });
-}
-/** Buttons that do one thing per press, wherever you are in the game. */
-function padButtons(g: Gamepad, now: number) {
+window.addEventListener('gamepadconnected', (e) => toast(`${kindOf(e.gamepad) === 'ps' ? 'PlayStation' : 'Xbox'} controller connected`));
+window.addEventListener('gamepaddisconnected', () => { if (!getPad()) toast('Controller disconnected'); });
+/** Buttons that do one thing per press: pause, camera, confirm or back on a sheet, box in a race. */
+function readPad() {
+  const g = getPad();
+  if (!g) return;
   const hit = (i: number) => { const d = !!g.buttons[i]?.pressed, was = !!padWas[i]; padWas[i] = d; return d && !was; };
-  const start = hit(9), view = hit(8), a = hit(0), b = hit(1), y = hit(3);
+  const start = hit(9), view = hit(8), a = hit(0), b = hit(1);
   if (start) { if (speed === 0) setSpeed(lastSpeed || 1); else { lastSpeed = speed; setSpeed(0); } }
   if (view) $('camBtn').click();
-  const sheet = $('modal').classList.contains('show');
-  if (sheet) {
-    // on a sheet: Cross/A confirms, Circle/B goes back
+  if ($('modal').classList.contains('show')) {
     if (a) document.getElementById('mGo')?.click();
     if (b) document.getElementById('mBack')?.click();
     return;
   }
-  const driving = !!race && mode !== 'practice' && race.player.car.manual;
-  if (driving && y) race!.recover();
-  if (driving && b && mode === 'race') $('boxBtn').click();
-  // feel the road: a thud for a barrier or a knock, a buzz on kerbs and grass
-  if (driving) {
-    const p = race!.player, c = p.car;
-    if (p.offs > lastOffs) rumble(g, 1, 0.8, 380);
-    else if (c.damage > lastDamage + 0.01) rumble(g, 0.7, 0.5, 220);
-    else if (now > rumbleAt && c.dist > track.hw - 0.4 && Math.abs(c.vf) > 4) { rumbleAt = now + 110; rumble(g, c.dist > track.hw ? 0.22 : 0, c.dist > track.hw ? 0.45 : 0.3, 120); }
-    lastOffs = p.offs; lastDamage = c.damage;
-  }
-}
-function readInput(now: number) {
-  const g = getPad();
-  if (g) { if (!padKind) { padKind = kindOf(g); padHints(); } padButtons(g, now); }
-  if (!race || mode === 'practice' || !race.player.car.manual) return;
-  const v = Math.abs(race.player.car.vf);
-  const k = (...c: string[]) => c.some((x) => keys.has(x));
-  let steer = (k('ArrowLeft', 'KeyA') ? 1 : 0) - (k('ArrowRight', 'KeyD') ? 1 : 0);
-  let thr = (k('ArrowUp', 'KeyW') ? 1 : 0) - (k('ArrowDown', 'KeyS') ? 1 : 0);
-  // a keyboard is all-or-nothing, so calm the steering down as the speed rises
-  steer *= 0.5 + 0.5 / (1 + v / 22);
-  if (g) {
-    const std = g.mapping === 'standard';
-    let ax = g.axes[0] ?? 0;
-    if (g.buttons[14]?.pressed) ax = -1; else if (g.buttons[15]?.pressed) ax = 1;
-    // dead zone, then a curve: small movements of the stick make fine corrections
-    const m = Math.max(0, Math.abs(ax) - 0.09) / 0.91;
-    if (m > 0) steer = -Math.sign(ax) * Math.pow(m, 1.5) * (0.62 + 0.38 / (1 + v / 30));
-    // triggers are analogue buttons on a standard pad; some browsers report them as axes instead
-    const trig = (btn: number, axis: number) => Math.max(g.buttons[btn]?.value ?? 0, !std && g.axes[axis] !== undefined && g.axes.length > 4 ? (g.axes[axis] + 1) / 2 : 0);
-    const go = Math.max(trig(7, 5), g.buttons[0]?.pressed ? 1 : 0), stop = Math.max(trig(6, 4), g.buttons[2]?.pressed ? 1 : 0);
-    if (go > 0.04 || stop > 0.04) thr = go - stop;
-  }
-  race.input.steer = steer; race.input.thr = thr;
+  if (b && mode === 'race') $('boxBtn').click();
 }
 
 // ---------------------------------------------------------------- frames
@@ -660,7 +581,7 @@ let last = performance.now(), acc = 0, hudT = 0, themeNow = '';
 function frame(now: number) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
-  readInput(now);
+  readPad();
   const step = () => (mode !== 'practice' && race ? race.step() : trainer.step());
   if (speed > 0) {
     acc += dt * 60 * speed;

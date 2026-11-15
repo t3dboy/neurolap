@@ -38,8 +38,6 @@ export interface RaceOpts {
   difficulty: 0 | 1 | 2;                  // rookie, pro, legend
   forecast: 'current' | 'changeable';
   startTyre: TyreId;
-  manual?: boolean;                       // the player drives their own car
-  free?: boolean;                         // open session: no start, no finish, just you and a few trained cars
 }
 export interface PitState { phase: 'in' | 'stopped' | 'out'; s: number; v: number; timer: number; total: number; next: TyreId; lat0: number; s0: number }
 export interface Entry {
@@ -83,8 +81,6 @@ export class Race {
   private lastContact = new Map<number, number>();
   private advised = { wear: false, wet: 0, dmg: false };
   private refLap: number;
-  /** The player's controls when driving by hand: steer +1 left .. -1 right, thr +1 flat out .. -1 full brakes. */
-  input = { steer: 0, thr: 0 };
   private Lc: number; private Wc: number;
 
   constructor(track: Track, cls: CarClass, setup: Setup, hall: Champion[], H: number, vision: number, surf: Surface, env: Env, opts: RaceOpts, seed: number) {
@@ -93,18 +89,17 @@ export class Race {
     this.rnd = mulberry32((seed * 7 + 99) >>> 0);
     this.Lc = cls.len * CAR_SCALE; this.Wc = cls.wid * CAR_SCALE;
     this.refLap = hall[0]?.lap ?? 60;
-    const field = opts.free ? 1 + Math.min(3, hall.length) : 8;
+    const field = 8;
     const diffSkill = [0.95, 0.972, 0.99][opts.difficulty], diffCar = [0.975, 1.0, 1.02][opts.difficulty];
     const nCp = Math.min(6000, Math.ceil(((opts.laps + 2) * track.length) / 50) + 4);
     for (let i = 0; i < field; i++) {
       const isPlayer = i === 0;
       // rivals drive brains from the same practice session; tougher fields get the better ones
-      const pick = isPlayer || opts.free ? Math.max(0, Math.min(i - (opts.free ? 1 : 0), hall.length - 1)) : opts.difficulty === 2 ? i % Math.min(3, hall.length) : opts.difficulty === 1 ? i % Math.min(5, hall.length) : Math.min(i, hall.length - 1);
+      const pick = isPlayer ? 0 : opts.difficulty === 2 ? i % Math.min(3, hall.length) : opts.difficulty === 1 ? i % Math.min(5, hall.length) : Math.min(i, hall.length - 1);
       const form = TEAM_FORM[i];
       const car = new Car();
       const tyre = isPlayer ? opts.startTyre : this.rivalStartTyre(i);
       car.tyre = TYRES[tyre];
-      car.manual = isPlayer && !!opts.manual;
       this.entries.push({
         i, car, team: TEAMS[i], isPlayer,
         genome: hall.length ? hall[pick].g : new Float32Array(4), d: derive(setup, cls, isPlayer ? 1 : form * diffCar, isPlayer ? 1 : 0.5 + 0.5 * form),
@@ -121,19 +116,11 @@ export class Race {
         lastStop: -99,
       });
     }
-    if (opts.free) {
-      // open session: you roll out in front, the trained cars come after you
-      this.entries.forEach((e, k) => { e.grid = k; e.pos = k + 1; placeCar(e.car, track, -6 - k * GRID_GAP * 2, 0); e.car.alive = true; e.pace = 'push'; });
-      this.order = this.entries.slice();
-      this.phase = 'racing';
-      return;
-    }
     this.qualify();
     this.buildForecast();
     this.say('info', `${track.name}: ${opts.laps} laps. ${this.order[0].team.name} on pole.`);
     const p = this.player;
     this.say('radio', p.grid === 0 ? 'Pole position! Clean start and it is ours to lose.' : `We start P${p.grid + 1}. Let's make up places.`);
-    if (opts.manual) this.say('radio', 'You are driving. Your AI set the qualifying lap; the race is yours.');
   }
 
   get player() { return this.entries[0]; }
@@ -231,8 +218,6 @@ export class Race {
     this.say('radio', tyre ? `Box this lap for ${TYRES[tyre].name.toLowerCase()}s. Box, box.` : 'Stay out, stay out.');
   }
   setPace(p: Pace) { this.player.pace = p; }
-  /** Player asks the marshals to put the car back on the road. */
-  recover() { const p = this.player; if (this.phase === 'racing' && !p.pit && !p.dnf && this.time >= p.holdUntil) this.rejoin(p, 0, 0, 0.8); }
 
   private sRel(c: Car): number {
     const L = this.track.length;
@@ -249,7 +234,6 @@ export class Race {
   }
 
   private retire(e: Entry, why: string) {
-    if (this.opts.free) { e.car.damage = 0.5; return; }
     e.dnf = true; e.dnfWhy = why; e.car.alive = false; e.car.vf = 0; e.car.vl = 0; e.car.w = 0;
     this.say('bad', `${e.team.short} is out: ${why}.`);
     if (e.isPlayer) this.say('radio', 'That is our race over. Sorry.');
@@ -266,7 +250,7 @@ export class Race {
     this.say('bad', `${e.team.short} hits the barrier${v > 30 ? ' hard' : ''}.`);
     if (e.isPlayer) this.say('radio', c.damage > 0.4 ? 'Big damage. Box for repairs when you can.' : 'We are in the wall! Keep it going.');
     // the marshals push it back to the middle of the road, where a driver knows how to get going
-    this.rejoin(e, 0, 0, e.car.manual ? 1.2 : 2.2);
+    this.rejoin(e, 0, 0, 2.2);
   }
 
   /** Racecraft: follow, look for a way past, keep off the car alongside. */
@@ -509,19 +493,15 @@ export class Race {
       else if (this.time < e.holdUntil) { c.vf = 0; c.vl = 0; c.w = 0; c.braking = true; c.mark = c.total; }
       else {
         feelRoad(c, this.surf);
-        if (c.manual && !e.finished) { c.inSteer = this.input.steer; c.inThr = this.input.thr; c.bias = 0; c.cap = Infinity; }
-        else {
-          if (e.finished) { c.manual = false; c.bias = 0; c.cap = 16; } else this.traffic(e);
-          c.pace = PACE[e.pace].mul * e.skill;
-          think(c, e.genome, this.H, t, this.vision);
-        }
+        if (e.finished) { c.bias = 0; c.cap = 16; } else this.traffic(e);
+        c.pace = PACE[e.pace].mul * e.skill;
+        think(c, e.genome, this.H, t, this.vision);
         drive(c, e.d, t, this.surf);
         if (!locate(c, t) || c.dist > t.ro - 0.6) { if (e.finished) { this.rejoin(e, 0, 0, 1); } else this.hitBarrier(e); }
         else {
           const v = Math.hypot(c.vf, c.vl);
           this.surf.carPass(c.idx, c.lat, v, DT);
-          if (c.manual) { /* a human may stop, reverse or dawdle as they please */ }
-          else if (c.vf < -3) this.rejoin(e, 0, 0, 2.5);
+          if (c.vf < -3) this.rejoin(e, 0, 0, 2.5);
           else if (c.total > c.mark + 5) { c.mark = c.total; c.stallT = 0; }
           else if ((c.stallT += DT) > 4) { this.rejoin(e, 0, 0, 1.5); this.say('bad', `${e.team.short} is recovered by the marshals.`); }
           // tyre wear: distance, pace, sliding, and rain tyres cooking on a dry road
@@ -529,7 +509,7 @@ export class Race {
           if (dS > 0) {
             const water = this.surf.waterAt(c.idx, c.lat);
             const wrong = 1 + (c.tyre.dryPenalty - 1) * (1 - Math.min(1, water * 3));
-            c.wear = Math.min(1, c.wear + (dS / L) * c.tyre.wearLap * (c.manual ? 1.3 : PACE[e.pace].wear) * wrong * (1 + 1.5 * Math.min(1, Math.abs(c.vl) / 6)));
+            c.wear = Math.min(1, c.wear + (dS / L) * c.tyre.wearLap * PACE[e.pace].wear * wrong * (1 + 1.5 * Math.min(1, Math.abs(c.vl) / 6)));
           }
           // pit entry
           if (e.boxCall && !e.finished) {

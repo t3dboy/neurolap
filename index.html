@@ -14,7 +14,6 @@
   <header id="top">
     <div class="seg" id="modeSeg">
       <button data-mode="practice" title="Watch the AI learn">Practice</button>
-      <button data-mode="drive" title="Drive it yourself against the trained cars">Drive</button>
       <button data-mode="race" title="Race weekend">Race</button>
     </div>
     <button class="chip" id="trackChip" title="Track"><b id="tName"></b><span id="tMeta"></span></button>
@@ -123,19 +122,7 @@
       <canvas id="brain" width="560" height="280"></canvas>
     </div>
 
-    <div class="card driveCard" data-for="drive">
-      <h3>At the wheel<small>arrows or WASD, R to recover</small></h3>
-      <div class="stats">
-        <div class="stat big"><b id="vSpd">0</b><span>km/h</span></div>
-        <div class="stat big"><b id="vLap" class="hot">0.00</b><span>this lap</span></div>
-        <div class="stat"><b id="vN">0</b><span>laps</span></div>
-        <div class="stat"><b id="vLast">-</b><span>last lap</span></div>
-        <div class="stat"><b id="vBest">-</b><span>your best</span></div>
-        <div class="stat"><b id="vAi">-</b><span>AI best</span></div>
-      </div>
-      <p class="hint" id="vNote"></p>
-    </div>
-    <div class="card tower" data-for="race drive">
+    <div class="card tower" data-for="race">
       <h3><span id="rLap">Lap 0</span><small id="rClock"></small></h3>
       <div id="tower"></div>
     </div>

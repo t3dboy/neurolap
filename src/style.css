@@ -14,11 +14,10 @@ button { font: inherit; color: inherit; }
 #c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; cursor: grab; }
 #c.drag { cursor: grabbing; }
 [data-for] { display: none; }
-body[data-mode="practice"] [data-for~="practice"], body[data-mode="race"] [data-for~="race"], body[data-mode="drive"] [data-for~="drive"] { display: revert; }
+body[data-mode="practice"] [data-for~="practice"], body[data-mode="race"] [data-for~="race"] { display: revert; }
 body[data-mode="race"] #dock { display: flex; }
-body[data-mode="race"] .card[data-for~="race"], body[data-mode="drive"] .card[data-for~="drive"] { display: block; }
-body[data-mode="practice"] .stats[data-for~="practice"], .driveCard .stats { display: grid; }
-.driveCard .hint { margin-top: 8px; }
+body[data-mode="race"] .card[data-for~="race"] { display: block; }
+body[data-mode="practice"] .stats[data-for~="practice"] { display: grid; }
 #paceSeg.off { opacity: 0.4; pointer-events: none; }
 
 /* shared pieces */

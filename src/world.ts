@@ -213,7 +213,7 @@ export function buildWorld(track: Track): World {
   // side of the road so we look into the garages and, across the track, into the stand.
   const flip = track.pitSide === 1, fx = flip ? -1 : 1;
   const T = new THREE.Vector3(track.tx[0], 0, track.tz[0]).multiplyScalar(fx), Nn = new THREE.Vector3(-track.tz[0], 0, track.tx[0]).multiplyScalar(fx);
-  const frame = new THREE.Matrix4().makeBasis(T, new THREE.Vector3(0, 1, 0), Nn).setPosition(track.px[0], 0, track.pz[0]);
+  const frame = new THREE.Matrix4().makeBasis(T, new THREE.Vector3(0, 1, 0), Nn).setPosition(track.px[0], track.h[0], track.pz[0]);
   const inv = frame.clone().invert();
   const tmp = new THREE.Vector3();
   /** 1 well inside the paddock area around the start, fading to 0 outside it. */
@@ -224,13 +224,38 @@ export function buildWorld(track: Track): World {
 
   const st = new Float64Array(4);
   const hillBase = 0.6 + track.maxH * 0.3;
+  // On the long circuits the road climbs tens of metres, so the land away from it has to rise
+  // and fall with it: a coarse map of the road's height nearby, spread out by inverse distance.
+  const big = track.length > 2500;
+  const RC = 30, rw = Math.ceil((maxX - minX) / RC) + 2, rh = Math.ceil((maxZ - minZ) / RC) + 2;
+  const region = new Float32Array(big ? rw * rh : 0);
+  if (big) {
+    const step = Math.max(1, Math.round(15 / track.ds));
+    for (let j = 0; j < rh; j++) for (let i = 0; i < rw; i++) {
+      const x = minX + i * RC, z = minZ + j * RC;
+      let sw = 0, sh = 0;
+      for (let k = 0; k < track.n; k += step) {
+        const dx = track.px[k] - x, dz = track.pz[k] - z, wgt = 1 / (dx * dx + dz * dz + 900);
+        sw += wgt * wgt; sh += wgt * wgt * track.h[k];
+      }
+      region[j * rw + i] = sh / sw;
+    }
+  }
+  const regionAt = (x: number, z: number) => {
+    const fx = Math.min(rw - 1.001, Math.max(0, (x - minX) / RC)), fz = Math.min(rh - 1.001, Math.max(0, (z - minZ) / RC));
+    const i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j, c = j * rw + i;
+    return (region[c] * (1 - u) + region[c + 1] * u) * (1 - v) + (region[c + rw] * (1 - u) + region[c + rw + 1] * u) * v;
+  };
   // Ground height. Near the road the land follows the road's own elevation; further out it
   // blends into rolling hills. Where two stretches are close at different heights the land
   // blends between them, except right beside the lower one, which keeps its level so the
   // upper road has to stand on a wall (or, where it passes over, a bridge).
+  const paddockH = track.h[0];
   const heightAt = (x: number, z: number) => {
     const pd = paddock(x, z);
-    const hills = (noise(x * 0.011, z * 0.011, 3) * look.hills + hillBase) * (1 - pd);
+    const hills = big
+      ? noise(x * 0.006, z * 0.006, 3) * look.hills * 1.6 + regionAt(x, z) + 1.2 + (paddockH - regionAt(x, z) - 1.2) * pd
+      : (noise(x * 0.011, z * 0.011, 3) * look.hills + hillBase) * (1 - pd);
     stretchesAt(track, x, z, st);
     if (st[1] < 0) return hills;
     const dmin = distAny(track, x, z);
@@ -253,7 +278,7 @@ export function buildWorld(track: Track): World {
 
   // ----- terrain -----
   {
-    const CELL = 2;
+    const CELL = big ? 3 : 2;
     const nx = Math.round((maxX - minX) / CELL) + 1, nz = Math.round((maxZ - minZ) / CELL) + 1;
     const pos = new Float32Array(nx * nz * 3), col = new Float32Array(nx * nz * 3);
     const ground = look.ground.map((c) => new THREE.Color(c));
@@ -276,11 +301,30 @@ export function buildWorld(track: Track): World {
       idx.push(a, c, b, b, c, d);
     }
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    const aPos = new THREE.BufferAttribute(pos, 3), aCol = new THREE.BufferAttribute(col, 3);
+    g.setAttribute('position', aPos);
+    g.setAttribute('color', aCol);
     g.setIndex(idx);
     g.computeVertexNormals();
-    add(g, toon, false);
+    // Cut the land into square patches that share the same vertices. Each patch knows its own
+    // bounds, so the bake camera and the shadow cameras skip the ones they cannot see: on the
+    // big circuits that is most of them whenever the view follows a car.
+    const P = 80, aNor = g.getAttribute('normal');
+    for (let pj = 0; pj < nz - 1; pj += P) for (let pi = 0; pi < nx - 1; pi += P) {
+      const cid: number[] = [];
+      const box = new THREE.Box3();
+      for (let j = pj; j < Math.min(nz - 1, pj + P); j++) for (let i = pi; i < Math.min(nx - 1, pi + P); i++) {
+        const a = j * nx + i, b = a + 1, c = a + nx, d = c + 1;
+        cid.push(a, c, b, b, c, d);
+        for (const v of [a, d]) box.expandByPoint(tmp.set(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]));
+      }
+      const cg = new THREE.BufferGeometry();
+      cg.setAttribute('position', aPos); cg.setAttribute('color', aCol); cg.setAttribute('normal', aNor);
+      cg.setIndex(cid);
+      box.expandByScalar(1);
+      cg.boundingBox = box; cg.boundingSphere = box.getBoundingSphere(new THREE.Sphere());
+      add(cg, toon, false);
+    }
 
     // diorama skirt: earth sides under the edge of the land
     const q = new Quads();
@@ -560,9 +604,10 @@ export function buildWorld(track: Track): World {
 
   // ----- scattered props (instanced) -----
   let lump = 1;
-  const cone = (r: number, h: number, y: number, c: string) => organic(new THREE.ConeGeometry(r, h, 11, 3).translate(0, y + h / 2, 0), c, 0.1, lump++ * 1.9);
+  // the big circuits are seen from further off and have many more trees: simpler ones do
+  const cone = (r: number, h: number, y: number, c: string) => organic(new THREE.ConeGeometry(r, h, big ? 8 : 11, big ? 2 : 3).translate(0, y + h / 2, 0), c, 0.1, lump++ * 1.9);
   const blob = (r: number, x: number, y: number, z: number, c: string, det = 1) =>
-    det === 0 ? tint(new THREE.IcosahedronGeometry(r, 0).translate(x, y, z), c) : organic(new THREE.IcosahedronGeometry(r, r > 1.8 ? 2 : 1).translate(x, y, z), c, r * 0.1, lump++ * 2.7);
+    det === 0 ? tint(new THREE.IcosahedronGeometry(r, 0).translate(x, y, z), c) : organic(new THREE.IcosahedronGeometry(r, big ? 1 : r > 1.8 ? 2 : 1).translate(x, y, z), c, r * 0.1, lump++ * 2.7);
   const GEO: Record<Look['props'][number], () => THREE.BufferGeometry> = {
     pine: () => mergeGeometries([
       tint(new THREE.CylinderGeometry(0.32, 0.42, 1.8, 6).translate(0, 0.9, 0), '#5b3d2a'),
@@ -585,16 +630,19 @@ export function buildWorld(track: Track): World {
       tint(new THREE.IcosahedronGeometry(1.7, 1).scale(1, 0.35, 1).translate(0, 6.9, 0), '#e0e0e0'),
     ])!,
   };
-  type Inst = { m: THREE.Matrix4; c: THREE.Color };
+  type Inst = { m: THREE.Matrix4; c: THREE.Color; k: number };
   const lists: Inst[][] = [[], [], [], []];
   const dummy = new THREE.Object3D();
   const tries = Math.round(((maxX - minX) * (maxZ - minZ)) / 26);
+  const thin = Math.max(0, Math.min(0.9, 1 - 500000 / ((maxX - minX) * (maxZ - minZ))));
   const inBlock = (x: number, z: number) => blocks.some((b) => Math.abs(x - b[0]) < b[2] && Math.abs(z - b[1]) < b[3]);
   for (let k = 0; k < tries; k++) {
     const x = minX + 2 + rnd() * (maxX - minX - 4), z = minZ + 2 + rnd() * (maxZ - minZ - 4);
     const u = rnd(), sc = 0.75 + rnd() * 0.7, rot = rnd() * Math.PI * 2, uc = rnd(), ud = rnd();
     const d = distAny(track, x, z);
     if (d < RO + 4.5 || ud > look.density) continue;
+    // on the very big circuits, thin the woods away from the road: they are seen from far off
+    if (thin > 0 && d > RO + 30 && rnd() < thin) continue;
     const h = heightAt(x, z);
     if (h < WATER_Y + 0.5 || paddock(x, z) > 0.02 || inBlock(x, z)) continue;
     const forest = track.theme === 'city' ? noise(x * 0.02 + 300, z * 0.02 + 90, 2) - 0.2 : noise(x * 0.018 + 200, z * 0.018 + 50, 2);
@@ -607,15 +655,22 @@ export function buildWorld(track: Track): World {
     dummy.scale.setScalar(type < 2 ? sc * 1.15 : sc);
     dummy.updateMatrix();
     const pal = look.tints[type];
-    lists[type].push({ m: dummy.matrix.clone(), c: new THREE.Color(pal[Math.floor(uc * pal.length)]) });
+    lists[type].push({ m: dummy.matrix.clone(), c: new THREE.Color(pal[Math.floor(uc * pal.length)]), k: Math.floor((x - minX) / 220) * 1000 + Math.floor((z - minZ) / 220) });
   }
+  // one instanced mesh per kind of prop per 220 m patch, so that unseen patches are skipped
   look.props.forEach((name, t) => {
     if (!lists[t].length) return;
     const g = GEO[name]();
-    const im = new THREE.InstancedMesh(g, toon, lists[t].length);
-    lists[t].forEach((it, i) => { im.setMatrixAt(i, it.m); im.setColorAt(i, it.c); });
-    im.castShadow = true; im.receiveShadow = true; im.frustumCulled = false;
-    group.add(im); geos.push(g);
+    geos.push(g);
+    const patches = new Map<number, Inst[]>();
+    for (const it of lists[t]) { let a = patches.get(it.k); if (!a) patches.set(it.k, (a = [])); a.push(it); }
+    for (const items of patches.values()) {
+      const im = new THREE.InstancedMesh(g, toon, items.length);
+      items.forEach((it, i) => { im.setMatrixAt(i, it.m); im.setColorAt(i, it.c); });
+      im.computeBoundingSphere();
+      im.castShadow = true; im.receiveShadow = true;
+      group.add(im);
+    }
   });
 
   return {

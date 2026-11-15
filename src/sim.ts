@@ -6,13 +6,39 @@ import { Surface, TyreDef, TYRES, TyreId } from './weather';
 export type { Setup } from './cars';
 export const DEFAULT_SETUP: Setup = { ...CAR_CLASSES.gt.setup };
 
+export type Breed = 'balanced' | 'aggression' | 'care';
 export interface AiConfig {
   population: number;
   mutation: number;   // weight noise sigma
   vision: number;     // sensor range in m
   hidden: number;     // hidden neurons
+  breed?: Breed;      // which personality trait selection favours
 }
-export const DEFAULT_AI: AiConfig = { population: 48, mutation: 0.14, vision: 70, hidden: 10 };
+export const DEFAULT_AI: AiConfig = { population: 48, mutation: 0.14, vision: 70, hidden: 10, breed: 'balanced' };
+
+/** Two genes at the end of every genome: how aggressive the driver is, and how kind to its tyres. */
+export const N_TRAITS = 2;
+export interface Traits { aggr: number; care: number }
+const sig = (v: number) => 1 / (1 + Math.exp(-v));
+export function traitsOf(g: Float32Array, H: number): Traits {
+  const base = H * (N_IN + 1) + N_OUT * (H + 1);
+  return g.length >= base + N_TRAITS ? { aggr: sig(g[base]), care: sig(g[base + 1]) } : { aggr: 0.5, care: 0.5 };
+}
+/** A name for a pair of traits, for the radio and the readouts. */
+export function persona(t: Traits): string {
+  const a = t.aggr, c = t.care;
+  if (a > 0.62 && c > 0.62) return 'Complete racer';
+  if (a > 0.62 && c < 0.42) return 'Hard charger';
+  if (a > 0.62) return 'Attacker';
+  if (c > 0.62 && a < 0.42) return 'Tyre whisperer';
+  if (c > 0.62) return 'Smooth operator';
+  if (a < 0.38 && c < 0.42) return 'Erratic';
+  if (a < 0.38) return 'Cautious';
+  return 'Steady';
+}
+
+export interface Ghost { gen: number; lap: number; lapStart: number; data: Float32Array; n: number }
+export const GHOST_EVERY = 3; // ticks between recorded samples
 
 const G = 9.81;
 const WHEELBASE = 2.6, AX_A = 1.17, AX_B = 1.43; // weight sits a little forward: stable by default
@@ -27,7 +53,7 @@ export const N_IN = N_RAYS + 3 + NOTES.length + 3;
 // which inputs flip sign when the view is mirrored left-to-right (rays are reversed instead)
 const MIRROR_SIGN = [...Array(N_RAYS).fill(1), 1, -1, -1, ...NOTES.map(() => -1), 1, 1, 1];
 export const N_OUT = 2;
-export const PATH_MAX = 3600;
+export const PATH_MAX = 7200; // samples every 3 ticks: six minutes of lap, enough for the longest circuits
 const FIT_P = 0.7;
 
 export interface Derived {
@@ -79,6 +105,7 @@ export class Car {
   sensors = new Float32Array(N_IN);
   hiddenAct = new Float32Array(32);
   path = new Float32Array(PATH_MAX * 3); pathN = 0;
+  ghost = new Float32Array(PATH_MAX * 4); // x, y, z, heading at each path sample, for replays
 }
 
 /** Put a car on the centreline at s metres from the start line, lateral offset lat, at rest. */
@@ -284,11 +311,15 @@ export class Trainer {
   crashX = new Float32Array(256); crashZ = new Float32Array(256); crashY = new Float32Array(256); crashCount = 0;
   /** The fastest distinct brains that have completed a lap with this car: the race grid is drawn from these. */
   hall: Champion[] = [];
+  /** The best lap of each generation that managed one, oldest first (thinned when there are many). */
+  ghosts: Ghost[] = [];
+  /** Set when the drivers came from another track or car: where from, and how quickly they found a lap here. */
+  transfer: { from: string; firstLapGen: number | null } | null = null;
   private stale = 0;
   private bestFit = 0;
   private pendingMark = false;
 
-  constructor(track: Track, setup: Setup, cls: CarClass, ai: AiConfig, surf: Surface, tyre: TyreId) {
+  constructor(track: Track, setup: Setup, cls: CarClass, ai: AiConfig, surf: Surface, tyre: TyreId, brains?: Float32Array[]) {
     this.track = track;
     this.setup = { ...setup };
     this.cls = cls;
@@ -298,9 +329,15 @@ export class Trainer {
     this.d = derive(setup, cls);
     this.rnd = mulberry32((track.seed ^ 0x9e3779b9) >>> 0);
     this.resetBrains();
+    if (brains && brains.length && brains[0].length === this.genomeSize) {
+      // drivers brought from elsewhere: the whole population, topped up with mutated copies if the field is bigger
+      this.genomes = [];
+      for (let i = 0; i < this.ai.population; i++) this.genomes.push(brains[i % brains.length].slice());
+      this.startGeneration();
+    }
   }
 
-  get genomeSize() { return this.ai.hidden * (N_IN + 1) + N_OUT * (this.ai.hidden + 1); }
+  get genomeSize() { return this.ai.hidden * (N_IN + 1) + N_OUT * (this.ai.hidden + 1) + N_TRAITS; }
 
   resetBrains() {
     const H = this.ai.hidden, size = this.genomeSize;
@@ -309,22 +346,25 @@ export class Trainer {
       const g = new Float32Array(size);
       for (let k = 0; k < size; k++) g[k] = gauss(this.rnd) * 0.5;
       g[H * (N_IN + 1) + (H + 1) + H] = -0.6; // speed bias: start out cautious
+      const tb = size - N_TRAITS;
+      for (let k = 0; k < N_TRAITS; k++) g[tb + k] = gauss(this.rnd) * 1.2; // temperaments start out varied
       this.genomes.push(g);
     }
     this.generation = 1;
     this.history = [];
     this.recordLap = null; this.setupBest = null; this.bestPathN = 0; this.bestPathVersion++;
-    this.crashCount = 0; this.hall = [];
+    this.crashCount = 0; this.hall = []; this.ghosts = []; this.transfer = null;
     this.stale = 0; this.bestFit = 0;
     this.startGeneration();
   }
 
   /** The car changed (setup, class or tyres): the drivers keep their brains but must prove themselves again. */
-  setCar(s: Setup, cls: CarClass, tyre: TyreId) {
+  setCar(s: Setup, cls: CarClass, tyre: TyreId, from = 'the old setup') {
     this.setup = { ...s }; this.cls = cls; this.tyre = tyre;
     this.d = derive(s, cls);
     this.setupBest = null; this.bestPathN = 0; this.bestPathVersion++;
-    this.hall = [];
+    this.hall = []; this.ghosts = [];
+    this.transfer = { from, firstLapGen: null };
     this.stale = 0; this.bestFit = 0;
     this.pendingMark = true;
     this.startGeneration();
@@ -350,6 +390,15 @@ export class Trainer {
       c.elite = i === 0 && this.generation > 1;
     }
     this.time = 0; this.tick = 0;
+  }
+
+  /** Up to `max` ghosts to show: the first lap ever, the latest, and others spread between. */
+  ghostPick(max: number): Ghost[] {
+    const g = this.ghosts;
+    if (g.length <= max) return g.slice();
+    const out: Ghost[] = [];
+    for (let k = 0; k < max; k++) out.push(g[Math.round((k / (max - 1)) * (g.length - 1))]);
+    return out;
   }
 
   get aliveCount() { let n = 0; for (const c of this.cars) if (c.alive) n++; return n; }
@@ -380,7 +429,7 @@ export class Trainer {
     this.time += DT; this.tick++;
     surf.step(DT);
     let alive = 0;
-    const rec = this.tick % 3 === 0;
+    const rec = this.tick % GHOST_EVERY === 0;
     for (let i = 0; i < this.cars.length; i++) {
       const c = this.cars[i];
       if (!c.alive) continue;
@@ -404,8 +453,9 @@ export class Trainer {
         c.pathN = 0;
       }
       if (c.lapStart >= 0 && c.lapTime === 0 && rec && c.pathN < PATH_MAX) {
-        const p = c.pathN * 3;
+        const p = c.pathN * 3, q = c.pathN * 4;
         c.path[p] = c.x; c.path[p + 1] = c.z; c.path[p + 2] = v;
+        c.ghost[q] = c.x; c.ghost[q + 1] = c.y; c.ghost[q + 2] = c.z; c.ghost[q + 3] = c.th;
         c.pathN++;
       }
       if (c.lapStart >= 0 && c.lapTime === 0 && c.total >= L) {
@@ -454,6 +504,24 @@ export class Trainer {
     }
     this.history.push({ gen: this.generation, progress: Math.min(1, bestProg), bestLap, finished, crashed, setupMark: this.pendingMark });
     this.pendingMark = false;
+    if (bestLap !== null) {
+      // keep this generation's best lap to replay as a ghost
+      const c = this.cars.find((x) => x.finished && x.lapTime === bestLap)!;
+      this.ghosts.push({ gen: this.generation, lap: bestLap, lapStart: c.lapStart, data: c.ghost.slice(0, c.pathN * 4), n: c.pathN });
+      if (this.ghosts.length > 40) {
+        // thin out the middle, keeping the first and the latest
+        let k = 1, best = Infinity;
+        for (let i = 1; i < this.ghosts.length - 1; i++) { const g = this.ghosts[i + 1].gen - this.ghosts[i - 1].gen; if (g < best) { best = g; k = i; } }
+        this.ghosts.splice(k, 1);
+      }
+      if (this.transfer && this.transfer.firstLapGen === null) this.transfer.firstLapGen = this.generation;
+    }
+    // breeding for a temperament: selection leans towards drivers who have more of it
+    const breed = this.ai.breed ?? 'balanced';
+    if (breed !== 'balanced') for (let i = 0; i < pop; i++) {
+      const tr = traitsOf(this.genomes[i], this.ai.hidden), v = breed === 'aggression' ? tr.aggr : tr.care;
+      this.cars[i].fitness *= 0.7 + 0.6 * v;
+    }
 
     const order = this.cars.map((_, i) => i).sort((a, b) => this.cars[b].fitness - this.cars[a].fitness);
     const top = this.cars[order[0]].fitness;
@@ -489,6 +557,8 @@ export class Trainer {
         const pm = u < 0.12 ? 0.5 : r() < 0.5 ? 0.15 : 0.6;
         for (let k = 0; k < child.length; k++) if (r() < pm) child[k] += gauss(r) * sg;
       }
+      // temperament genes drift faster than the driving ones, so a breeding goal shows in tens of generations
+      if (breed !== 'balanced') for (let k = child.length - N_TRAITS; k < child.length; k++) child[k] += gauss(r) * 0.25;
       next.push(child);
     }
     this.genomes = next;

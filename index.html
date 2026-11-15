@@ -14,10 +14,13 @@
   <header id="top">
     <div class="seg" id="modeSeg">
       <button data-mode="practice" title="Watch the AI learn">Practice</button>
-      <button data-mode="race" title="Race weekend">Race</button>
+      <button data-mode="challenge" title="Hit a lap time on a parts budget">Challenges</button>
+      <button data-mode="race" title="One race weekend">Race</button>
+      <button data-mode="season" title="A championship across several tracks">Championship</button>
     </div>
     <button class="chip" id="trackChip" title="Track"><b id="tName"></b><span id="tMeta"></span></button>
     <button class="btn icon" id="newTrack" title="New track">&#x27F3;</button>
+    <button class="btn" id="shareBtn" title="Copy a link to this track, car and setup, with your best lap to beat">Share</button>
     <button class="chip" id="carChip" title="Car"><b id="cName"></b><span id="cMeta"></span></button>
     <div class="grow"></div>
     <div class="cond">
@@ -47,12 +50,22 @@
     <section class="pane" data-pane="track">
       <h2>Circuit style</h2>
       <div id="styleList" class="cards"></div>
+      <button id="drawBtn" class="btn wide">Draw your own circuit</button>
       <h2>Seed</h2>
       <div class="row">
         <input id="seed" type="number" min="1" max="999999" />
         <button id="rollTrack" class="btn primary">New track</button>
       </div>
       <p id="trackInfo" class="hint"></p>
+      <h2>When the track changes</h2>
+      <div class="seg" id="transferSeg">
+        <button data-v="1">Bring the drivers</button>
+        <button data-v="0">Start from scratch</button>
+      </div>
+      <p class="hint">Bring the drivers to see how quickly what they learned here carries over to a new circuit or car.</p>
+      <h2>Share</h2>
+      <button id="shareBtn2" class="btn wide">Copy a link to this track and car</button>
+      <p class="hint">The link holds the circuit, the car and your setup, plus your best lap for a friend to beat.</p>
     </section>
 
     <section class="pane" data-pane="car">
@@ -70,6 +83,13 @@
       <h2>How the driver learns</h2>
       <p class="hint">Nobody steers. Each generation, a field of small neural networks drives the car; the ones that get furthest, fastest, are bred and mutated into the next.</p>
       <div id="aiSliders"></div>
+      <h2>Breed for</h2>
+      <div class="seg" id="breedSeg">
+        <button data-v="balanced">Pace only</button>
+        <button data-v="aggression">Aggression</button>
+        <button data-v="care">Tyre care</button>
+      </div>
+      <p class="hint" id="breedHint"></p>
       <button id="resetBrain" class="btn wide">Wipe the drivers and start over</button>
     </section>
 
@@ -120,6 +140,11 @@
     <div class="card fold" data-for="practice" data-fold="brain">
       <h3><button class="foldBtn">Leader's brain</button><small>sees, thinks, drives</small></h3>
       <canvas id="brain" width="560" height="280"></canvas>
+      <div class="persona" id="persona"></div>
+    </div>
+    <div class="card" data-for="practice" id="adaptCard">
+      <h3>Brain transfer</h3>
+      <p class="hint" id="adapt"></p>
     </div>
 
     <div class="card tower" data-for="race">
@@ -138,6 +163,7 @@
       <span class="lbl">Your car</span>
       <b id="dPos">P1</b>
       <small id="dGap"></small>
+      <small id="dPersona"></small>
       <small id="dSpd"></small>
     </div>
     <div class="dcell tyre">
@@ -178,10 +204,13 @@
       <button id="camBtn" class="btn">Overview</button>
       <button id="lineBtn" class="btn on" data-for="practice">Racing line</button>
       <button id="rayBtn" class="btn on" data-for="practice">Sensors</button>
+      <button id="ghostBtn" class="btn on" data-for="practice" title="Replay the best lap of earlier generations">Ghosts</button>
       <button id="hudBtn" class="btn on">Readouts</button>
     </div>
   </div>
 
+  <div id="banner"></div>
+  <div id="director"></div>
   <div id="modal"></div>
   <div id="toast"></div>
   <script type="module" src="/src/main.ts"></script>

@@ -43,7 +43,10 @@ export interface Frame {
   path: { P: Float32Array; N: number; version: number } | null;
   crash: { x: Float32Array; y: Float32Array; z: Float32Array; count: number };
   startLights: number;        // how many of the five start lights are lit
+  ghosts?: GhostPose[];       // replays of earlier laps, drawn see-through
 }
+export interface GhostPose { x: number; y: number; z: number; th: number; fade: number }
+const GHOST_MAX = 8;
 
 // ---------------------------------------------------------------- sky
 const smooth = (a: number, b: number, x: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
@@ -379,7 +382,9 @@ export class View {
   private rain: THREE.LineSegments; private snowPts: THREE.Points; private rainMat: THREE.ShaderMaterial; private snowMat: THREE.ShaderMaterial;
   private spray: THREE.Points; private sprayMat: THREE.ShaderMaterial; private sp = new Float32Array(SPRAY_N * SPRAY_K); private spHead = 0;
   private wheels: THREE.InstancedMesh; private wheelMat: THREE.MeshStandardMaterial;
+  private ghostCars: THREE.InstancedMesh;
   private lineVersion = -1; private crashSeen = -1;
+  private camDist = 800;
   private center = new THREE.Vector3(); private R = new THREE.Vector3(); private U = new THREE.Vector3();
   private fit = { cx: 0, cy: 0, w: 1, h: 1 };
   private cam = { cx: 0, cy: 0, s: 0.3 };
@@ -459,6 +464,10 @@ export class View {
     this.wheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, metalness: 0.1, envMapIntensity: 0.6 });
     this.wheels = put(new THREE.InstancedMesh(wheelGeometry(), this.wheelMat, MAX_CARS * 4), L_LIVE);
     this.wheels.receiveShadow = true;
+    // ghosts: earlier laps replayed as pale, see-through cars
+    this.ghostCars = put(new THREE.InstancedMesh(carGeometry('gt', 0), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.42, depthWrite: false }), GHOST_MAX), L_LIVE);
+    this.ghostCars.renderOrder = 6; this.ghostCars.count = 0;
+    this.ghostCars.setColorAt(0, new THREE.Color());
     // a soft pool of shade under each car
     const sc = document.createElement('canvas'); sc.width = 128; sc.height = 128;
     const sg2 = sc.getContext('2d')!;
@@ -478,7 +487,7 @@ export class View {
     this.rays.renderOrder = 4;
 
     const lg = new THREE.BufferGeometry();
-    const LMAX = 3600;
+    const LMAX = 7200;
     lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(LMAX * 6), 3));
     lg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(LMAX * 6), 3));
     const li = new Uint32Array((LMAX - 1) * 6);
@@ -539,6 +548,8 @@ export class View {
     this.cls = cls;
     this.cars.geometry.dispose();
     this.cars.geometry = carGeometry(cls.id, 0);
+    this.ghostCars.geometry.dispose();
+    this.ghostCars.geometry = carGeometry(cls.id, 0.04);
   }
 
   setTrack(track: Track, surf: Surface) {
@@ -578,7 +589,13 @@ export class View {
     this.scene.add(this.wet);
     this.wetVersion = -1;
 
-    for (const cam of [this.camera, this.bakeCam]) { cam.position.copy(c).addScaledVector(CAM_DIR, 800); cam.lookAt(c); cam.updateMatrixWorld(); }
+    // far enough back, and deep enough, to hold the whole world: the long circuits are kilometres across
+    const reach = Math.hypot(w.maxX - w.minX, w.maxZ - w.minZ) / 2;
+    this.camDist = Math.max(800, reach + 260);
+    for (const cam of [this.camera, this.bakeCam]) {
+      cam.position.copy(c).addScaledVector(CAM_DIR, this.camDist); cam.far = this.camDist * 2; cam.updateProjectionMatrix();
+      cam.lookAt(c); cam.updateMatrixWorld();
+    }
     this.R.setFromMatrixColumn(this.camera.matrixWorld, 0);
     this.U.setFromMatrixColumn(this.camera.matrixWorld, 1);
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
@@ -638,7 +655,7 @@ export class View {
       const co = Math.cos(focus.th), si = Math.sin(focus.th), ld = this.lead;
       const p = this.v.set(focus.x + (co * focus.vf - si * focus.vl) * ld, focus.y, focus.z + (si * focus.vf + co * focus.vl) * ld).sub(this.center);
       tx = p.dot(this.R); ty = p.dot(this.U); ts = this.followScale;
-      this.focusD = (800 - p.dot(CAM_DIR) - cam.near) / range;
+      this.focusD = (this.camDist - p.dot(CAM_DIR) - cam.near) / range;
     } else {
       const s0 = Math.max(this.fit.w / freeW, this.fit.h / freeH);
       ts = s0 / this.zoom; tx = this.fit.cx + this.panX; ty = this.fit.cy + this.panY;
@@ -654,7 +671,7 @@ export class View {
     cam.bottom = cam.top - H * c.s;
     cam.updateProjectionMatrix();
     // otherwise focus on the ground in the middle of the free part of the view
-    if (!fol) this.focusD = (800 + (this.U.y * c.cy) / CAM_DIR.y - cam.near) / range;
+    if (!fol) this.focusD = (this.camDist + (this.U.y * c.cy) / CAM_DIR.y - cam.near) / range;
   }
 
   private allocTile(w: number, h: number) {
@@ -704,10 +721,11 @@ export class View {
     const t = this.tile!, cx = t.l + t.w / 2, cy = t.b + t.h / 2, k = -(this.U.y * cy) / CAM_DIR.y;
     const g = this.v4.copy(this.center).addScaledVector(this.R, cx).addScaledVector(this.U, cy).addScaledVector(CAM_DIR, k);
     const rad = Math.hypot(t.w / 2, t.h / 2 / CAM_DIR.y) + 34;
-    light.position.copy(g).addScaledVector(dir, 760);
+    const back = Math.max(760, rad + 420);
+    light.position.copy(g).addScaledVector(dir, back);
     light.target.position.copy(g);
     const sc = light.shadow.camera;
-    sc.left = -rad; sc.right = rad; sc.top = rad; sc.bottom = -rad; sc.near = 60; sc.far = 1500;
+    sc.left = -rad; sc.right = rad; sc.top = rad; sc.bottom = -rad; sc.near = 60; sc.far = back * 2;
     sc.updateProjectionMatrix();
   }
 
@@ -943,6 +961,20 @@ export class View {
       this.sprayMat.uniforms.uCol.value.copy(k.snow).multiplyScalar(1.15).addScalar(0.012);
     }
 
+    const gh = f.ghosts ?? [];
+    this.ghostCars.count = Math.min(GHOST_MAX, gh.length);
+    for (let i = 0; i < this.ghostCars.count; i++) {
+      const g = gh[i];
+      this.q.setFromAxisAngle(View.UP, -g.th);
+      this.m4.compose(this.v.set(g.x, g.y + 0.08, g.z), this.q, this.sc.setScalar(S));
+      this.ghostCars.setMatrixAt(i, this.m4);
+      // the latest ghost is a bright ice blue, older ones fade towards grey
+      this.col.setRGB(0.55 + 0.25 * g.fade, 0.8 + 0.15 * g.fade, 1).multiplyScalar(0.55 + 0.45 * g.fade);
+      this.ghostCars.setColorAt(i, this.col);
+    }
+    this.ghostCars.instanceMatrix.needsUpdate = true;
+    if (this.ghostCars.instanceColor) this.ghostCars.instanceColor.needsUpdate = true;
+
     const mk = f.marker;
     this.marker.visible = !!mk && mk.alive;
     if (mk) { this.marker.position.set(mk.x, mk.y + 5.4 + Math.sin(t * 5) * 0.35, mk.z); this.marker.rotation.y = t * 2; }
@@ -961,7 +993,7 @@ export class View {
     this.line.visible = this.showLine && !!f.path;
     if (f.path && this.lineVersion !== f.path.version) {
       this.lineVersion = f.path.version;
-      const N = Math.min(3600, f.path.N), P = f.path.P, g = this.line.geometry;
+      const N = Math.min(7200, f.path.N), P = f.path.P, g = this.line.geometry;
       const pos = g.attributes.position.array as Float32Array, colr = g.attributes.color.array as Float32Array;
       let v0 = Infinity, v1 = -Infinity;
       for (let i = 0; i < N; i++) { v0 = Math.min(v0, P[i * 3 + 2]); v1 = Math.max(v1, P[i * 3 + 2]); }
@@ -1060,7 +1092,7 @@ export class View {
     su.bgTop.value.copy(this.col); su.bgBottom.value.copy(k.hor).multiplyScalar(0.95);
     su.uNight.value = k.night * (1 - this.overcast); su.uFlash.value = this.flash * this.flash * 1.5; su.uTime.value = time;
     su.uCloud.value = k.day * (0.55 - 0.45 * this.overcast) * (this.env.weather === 'dry' ? 1 : 0.4);
-    su.uFog.value.copy(k.hor).multiplyScalar(0.8); su.uFogAmt.value = 0.1 + 0.3 * this.overcast; su.uFocus.value = this.focusD;
+    su.uFog.value.copy(k.hor).multiplyScalar(0.8); su.uFogAmt.value = 0.1 + 0.3 * this.overcast; su.uFocus.value = this.focusD; su.uRange.value = cam.far - cam.near;
     su.uPx.value.set(1 / r.domElement.clientWidth, 1 / r.domElement.clientHeight);
     const vu = this.volMat.uniforms;
     vu.tDepth.value = A.depthTexture; vu.tAlbedo.value = this.gAlb.texture; vu.uRes.value.set(this.hdr.width, this.hdr.height);

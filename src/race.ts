@@ -2,7 +2,7 @@
 // strategy. The drivers are the brains trained in practice; a thin layer of racecraft on
 // top handles traffic, because nothing in practice ever taught them about other cars.
 import { Track, pitLat } from './track';
-import { Car, Derived, derive, think, drive, locate, feelRoad, placeCar, DT, SPAWN_BACK, Champion, Setup } from './sim';
+import { Car, Derived, derive, think, drive, locate, feelRoad, placeCar, DT, SPAWN_BACK, Champion, Setup, Traits, traitsOf, persona } from './sim';
 import { CarClass } from './cars';
 import { Surface, Env, TYRES, TyreId, WeatherKind } from './weather';
 import { mulberry32, Rng } from './rng';
@@ -38,6 +38,7 @@ export interface RaceOpts {
   difficulty: 0 | 1 | 2;                  // rookie, pro, legend
   forecast: 'current' | 'changeable';
   startTyre: TyreId;
+  rivalBoost?: number;                    // championship: how much the rival cars have been developed (1 = not at all)
 }
 export interface PitState { phase: 'in' | 'stopped' | 'out'; s: number; v: number; timer: number; total: number; next: TyreId; lat0: number; s0: number }
 export interface Entry {
@@ -53,6 +54,7 @@ export interface Entry {
   holdUntil: number; passSide: number;
   plan: { lap: number; wearLimit: number; react: number; wait: number };
   lastStop: number;
+  traits: Traits; persona: string;
 }
 export interface RaceEvent { t: number; text: string; kind: 'info' | 'radio' | 'pit' | 'pass' | 'bad' | 'purple' | 'flag' }
 export interface Spell { t0: number; t1: number; kind: WeatherKind; intensity: number }
@@ -79,7 +81,7 @@ export class Race {
   private tick = 0;
   private wonAt = 0;
   private lastContact = new Map<number, number>();
-  private advised = { wear: false, wet: 0, dmg: false };
+  private advised = { wear: false, wet: 0, dmg: false, care: false };
   private refLap: number;
   private Lc: number; private Wc: number;
 
@@ -90,7 +92,7 @@ export class Race {
     this.Lc = cls.len * CAR_SCALE; this.Wc = cls.wid * CAR_SCALE;
     this.refLap = hall[0]?.lap ?? 60;
     const field = 8;
-    const diffSkill = [0.95, 0.972, 0.99][opts.difficulty], diffCar = [0.975, 1.0, 1.02][opts.difficulty];
+    const diffSkill = [0.95, 0.972, 0.99][opts.difficulty], diffCar = [0.975, 1.0, 1.02][opts.difficulty] * (opts.rivalBoost ?? 1);
     const nCp = Math.min(6000, Math.ceil(((opts.laps + 2) * track.length) / 50) + 4);
     for (let i = 0; i < field; i++) {
       const isPlayer = i === 0;
@@ -100,9 +102,13 @@ export class Race {
       const car = new Car();
       const tyre = isPlayer ? opts.startTyre : this.rivalStartTyre(i);
       car.tyre = TYRES[tyre];
+      const genome = hall.length ? hall[pick].g : new Float32Array(4);
+      // rivals that share a brain still differ in temperament, so each gets its own nudge
+      const tr0 = traitsOf(genome, H), jit = isPlayer ? 0 : 0.45;
+      const traits: Traits = { aggr: Math.min(1, Math.max(0, tr0.aggr + (this.rnd() - 0.5) * jit)), care: Math.min(1, Math.max(0, tr0.care + (this.rnd() - 0.5) * jit)) };
       this.entries.push({
         i, car, team: TEAMS[i], isPlayer,
-        genome: hall.length ? hall[pick].g : new Float32Array(4), d: derive(setup, cls, isPlayer ? 1 : form * diffCar, isPlayer ? 1 : 0.5 + 0.5 * form),
+        genome, d: derive(setup, cls, isPlayer ? 1 : form * diffCar, isPlayer ? 1 : 0.5 + 0.5 * form),
         skill: isPlayer ? 1 : diffSkill * (0.99 + 0.02 * this.rnd()),
         pace: 'balanced', boxCall: null, pit: null,
         lap: 0, lapStartT: 0, lastLap: null, bestLap: null,
@@ -114,6 +120,7 @@ export class Race {
         holdUntil: 0, passSide: 0,
         plan: { lap: Math.max(1, Math.round(opts.laps * (0.35 + 0.3 * this.rnd()))), wearLimit: 0.6 + 0.2 * this.rnd(), react: 3 + this.rnd() * 14, wait: 0 },
         lastStop: -99,
+        traits, persona: persona(traits),
       });
     }
     this.qualify();
@@ -121,6 +128,8 @@ export class Race {
     this.say('info', `${track.name}: ${opts.laps} laps. ${this.order[0].team.name} on pole.`);
     const p = this.player;
     this.say('radio', p.grid === 0 ? 'Pole position! Clean start and it is ours to lose.' : `We start P${p.grid + 1}. Let's make up places.`);
+    const pt = p.traits;
+    this.say('radio', pt.aggr > 0.62 ? `Our driver is a ${p.persona.toLowerCase()}: expect some lunges.` : pt.care > 0.62 ? `Our driver is a ${p.persona.toLowerCase()}: we can run long on these tyres.` : pt.aggr < 0.38 ? 'Our driver is cautious: clean laps, few risks.' : `Our driver: ${p.persona.toLowerCase()}.`);
   }
 
   get player() { return this.entries[0]; }
@@ -267,11 +276,13 @@ export class Race {
     // overtaking is for straights: in and into corners, hold station
     let bendy = 0;
     for (let k = 0; k <= 36; k += 6) bendy = Math.max(bendy, Math.abs(t.curv[(c.idx + k) % t.n]));
-    const straight = bendy < 0.012;
+    const ag = e.traits.aggr;
+    // an aggressive driver will try a move into the braking zone, and from further back
+    const straight = bendy < 0.012 + 0.014 * Math.max(0, ag - 0.4);
     if (!straight) e.passSide = 0;
-    if (ahead && gapA < 46) {
+    if (ahead && gapA < 46 + 14 * ag) {
       const a = ahead.car, dl = a.lat - c.lat;
-      if (straight && gapA < 36 && c.vf - a.vf > -3) {
+      if (straight && gapA < 30 + 16 * ag && c.vf - a.vf > -3 - 2 * ag) {
         const roomL = t.hw - a.lat - W * 0.5, roomR = t.hw + a.lat - W * 0.5;
         if (!e.passSide) e.passSide = roomL > roomR ? 1 : -1;
         const room = e.passSide > 0 ? roomL : roomR;
@@ -282,7 +293,7 @@ export class Race {
           want = wl - (c.lat - c.bias);
         } else e.passSide = 0;
       }
-      if (Math.abs(dl) < W * 1.02 && gapA < Lc + 18) cap = Math.max(5, a.vf + (gapA - Lc - 2.2) * 0.9);
+      if (Math.abs(dl) < W * 1.02 && gapA < Lc + 18) cap = Math.max(5, a.vf + (gapA - Lc - 2.2 + 1.6 * (ag - 0.5)) * 0.9);
     } else e.passSide = 0;
     want += squeeze * (straight ? 1.2 : 0.5);
     const lim = t.hw * (straight ? 0.55 : 0.2), step = 2.4 * DT;
@@ -413,7 +424,13 @@ export class Race {
   private advise() {
     const p = this.player, c = p.car;
     if (p.finished || p.dnf || p.pit) return;
-    if (c.wear > 0.68 && !this.advised.wear) { this.advised.wear = true; this.say('radio', 'These tyres are nearly gone. Box when you are ready.'); }
+    if (c.wear > 0.68 && !this.advised.wear) { this.advised.wear = true; this.say('radio', p.traits.aggr > 0.62 ? 'You have been hard on these tyres. They are nearly gone: box when you are ready.' : 'These tyres are nearly gone. Box when you are ready.'); }
+    if (!this.advised.care && p.lap >= 2 && p.traits.care > 0.6) {
+      // compare with the field: is our driver really making them last?
+      let sum = 0, k = 0;
+      for (const o of this.entries) if (!o.isPlayer && !o.dnf && !o.pit && o.car.tyre.id === c.tyre.id) { sum += o.car.wear; k++; }
+      if (k && c.wear < (sum / k) * 0.85) { this.advised.care = true; this.say('radio', `Tyres look great: ${Math.round((1 - c.wear) * 100)}% left, better than the cars around us. Lovely tyre management.`); }
+    }
     const w = this.surf.lineWater(), level = w > 0.6 ? 2 : w > 0.28 ? 1 : w < 0.1 ? 0 : -1;
     if (level >= 0 && level !== this.advised.wet) {
       this.advised.wet = level;
@@ -438,8 +455,9 @@ export class Race {
       if (this.phase === 'racing' && !e.dnf && !e.finished && e.pos < was && this.time > 4) {
         const victim = prev[k];
         if (victim && victim !== e && !victim.pit && !victim.dnf && !e.pit) {
-          this.say('pass', `${e.team.short} takes P${e.pos} from ${victim.team.short}.`);
-          if (e.isPlayer) this.say('radio', e.pos === 1 ? 'You lead the race!' : `Great move. P${e.pos}.`);
+          const lunge = e.traits.aggr > 0.62 && this.rnd() < 0.6;
+          this.say('pass', lunge ? `${e.team.short} dives down the inside of ${victim.team.short} for P${e.pos}!` : `${e.team.short} takes P${e.pos} from ${victim.team.short}.`);
+          if (e.isPlayer) this.say('radio', e.pos === 1 ? 'You lead the race!' : lunge ? `Brave move! P${e.pos}. That is our ${e.persona.toLowerCase()}.` : `Great move. P${e.pos}.`);
           else if (victim.isPlayer) this.say('radio', `Lost a place to ${e.team.short}. P${victim.pos + 1}.`);
         }
       }
@@ -494,7 +512,7 @@ export class Race {
       else {
         feelRoad(c, this.surf);
         if (e.finished) { c.bias = 0; c.cap = 16; } else this.traffic(e);
-        c.pace = PACE[e.pace].mul * e.skill;
+        c.pace = PACE[e.pace].mul * e.skill * (1 + 0.012 * (e.traits.aggr - 0.5));
         think(c, e.genome, this.H, t, this.vision);
         drive(c, e.d, t, this.surf);
         if (!locate(c, t) || c.dist > t.ro - 0.6) { if (e.finished) { this.rejoin(e, 0, 0, 1); } else this.hitBarrier(e); }
@@ -509,7 +527,7 @@ export class Race {
           if (dS > 0) {
             const water = this.surf.waterAt(c.idx, c.lat);
             const wrong = 1 + (c.tyre.dryPenalty - 1) * (1 - Math.min(1, water * 3));
-            c.wear = Math.min(1, c.wear + (dS / L) * c.tyre.wearLap * PACE[e.pace].wear * wrong * (1 + 1.5 * Math.min(1, Math.abs(c.vl) / 6)));
+            c.wear = Math.min(1, c.wear + (dS / L) * c.tyre.wearLap * PACE[e.pace].wear * (1.3 - 0.6 * e.traits.care) * wrong * (1 + 1.5 * Math.min(1, Math.abs(c.vl) / 6)));
           }
           // pit entry
           if (e.boxCall && !e.finished) {
